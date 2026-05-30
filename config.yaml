@@ -1,0 +1,22 @@
+repository:
+  root: "."
+  exclude:
+    - node_modules
+    - .git
+    - __pycache__
+    - venv
+    - .venv
+
+languages:
+  - python
+  - javascript
+  - typescript
+
+graph:
+  storage: "./.sin/knowledge.graph"
+  temporal_depth: 50  # commits to analyze
+  include_intent: true  # parse commit messages for intent
+
+mcp:
+  host: "127.0.0.1"
+  port: 8765
