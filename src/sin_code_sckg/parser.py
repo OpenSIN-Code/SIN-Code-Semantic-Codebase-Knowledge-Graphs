@@ -1,12 +1,10 @@
-"""Tree-sitter basierter semantischer Parser für mehrere Sprachen."""
+"""Tree-sitter basierter semantischer Parser fuer mehrere Sprachen."""
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
-
-from tree_sitter import Language, Parser, Node
 
 
 @dataclass
@@ -38,24 +36,45 @@ class Intent:
     inferred_type: str  # refactor, feature, fix, docs
 
 
+def _build_parser(language):
+    """Robust gegen tree-sitter 0.22 und 0.23+ API-Unterschiede."""
+    from tree_sitter import Parser
+    try:
+        # tree-sitter >= 0.22: Parser(language)
+        return Parser(language)
+    except TypeError:
+        # aeltere API: Parser() + set_language
+        p = Parser()
+        p.set_language(language)
+        return p
+
+
 class SemanticParser:
     """Parst Code und Git-History in semantische Objekte."""
 
     def __init__(self, languages: list[str] | None = None):
         self.languages = languages or ["python", "javascript", "typescript"]
-        self._parsers: dict[str, Parser] = {}
-        self._langs: dict[str, Language] = {}
+        self._parsers: dict = {}
+        self._langs: dict = {}
         self._init_languages()
 
     def _init_languages(self) -> None:
+        from tree_sitter import Language
         for lang in self.languages:
             try:
                 pkg = __import__(f"tree_sitter_{lang}", fromlist=["language"])
-                self._langs[lang] = Language(pkg.language())
-                p = Parser(self._langs[lang])
-                self._parsers[lang] = p
-            except Exception as e:
+                if lang == "typescript":
+                    raw = pkg.language_typescript()
+                else:
+                    raw = pkg.language()
+                self._langs[lang] = Language(raw)
+                self._parsers[lang] = _build_parser(self._langs[lang])
+            except Exception as e:  # pragma: no cover - depends on env
                 print(f"[WARN] Could not load {lang}: {e}")
+
+    @property
+    def available(self) -> bool:
+        return bool(self._parsers)
 
     def _lang_for_file(self, filepath: str) -> str | None:
         ext = Path(filepath).suffix.lower()
@@ -84,16 +103,8 @@ class SemanticParser:
         self._walk(tree.root_node, source, filepath, lang_name, symbols)
         return symbols
 
-    def _walk(
-        self,
-        node: Node,
-        source: bytes,
-        filepath: str,
-        lang_name: str,
-        symbols: list[Symbol],
-    ) -> None:
+    def _walk(self, node, source, filepath, lang_name, symbols) -> None:
         kind = node.type
-        # Python
         if lang_name == "python":
             if kind in ("function_definition", "class_definition"):
                 sym_kind = "function" if kind == "function_definition" else "class"
@@ -105,24 +116,14 @@ class SemanticParser:
                     (c for c in node.children if c.type == "block"), None
                 )
                 body = body_node.text.decode("utf-8") if body_node else ""
-                # Decorators
                 decorators = []
-                for c in node.children:
-                    if c.type == "decorated" or c.type == "decorator":
-                        decorators.append(c.text.decode("utf-8"))
-                # Docstring
-                doc = None
-                if body_node:
-                    stmts = [
-                        n for n in body_node.children
-                        if n.type == "expression_statement"
-                    ]
-                    if stmts:
-                        first = stmts[0]
-                        if "string" in first.text.decode("utf-8").strip()[:3]:
-                            doc = first.text.decode("utf-8")
-                # Calls inside body
-                calls = self._extract_calls(body_node, source)
+                parent = node.parent
+                if parent is not None and parent.type == "decorated_definition":
+                    for c in parent.children:
+                        if c.type == "decorator":
+                            decorators.append(c.text.decode("utf-8"))
+                doc = self._python_docstring(body_node)
+                calls = self._extract_calls(body_node) if body_node else []
                 symbols.append(
                     Symbol(
                         name=name,
@@ -136,7 +137,6 @@ class SemanticParser:
                         docstring=doc,
                     )
                 )
-        # JS/TS
         elif lang_name in ("javascript", "typescript"):
             if kind in (
                 "function_declaration",
@@ -146,11 +146,12 @@ class SemanticParser:
             ):
                 sym_kind = "class" if kind == "class_declaration" else "function"
                 name_node = next(
-                    (c for c in node.children if c.type == "identifier"), None
+                    (c for c in node.children if c.type in ("identifier", "property_identifier")),
+                    None,
                 )
                 name = name_node.text.decode("utf-8") if name_node else "<anon>"
                 body = node.text.decode("utf-8")
-                calls = self._extract_calls(node, source)
+                calls = self._extract_calls(node)
                 symbols.append(
                     Symbol(
                         name=name,
@@ -165,14 +166,27 @@ class SemanticParser:
         for child in node.children:
             self._walk(child, source, filepath, lang_name, symbols)
 
-    def _extract_calls(self, node: Node, source: bytes) -> list[str]:
+    @staticmethod
+    def _python_docstring(body_node) -> str | None:
+        """Korrekte Docstring-Erkennung ueber Node-Typen (nicht ueber Text)."""
+        if body_node is None:
+            return None
+        for stmt in body_node.children:
+            if stmt.type == "expression_statement":
+                inner = stmt.children[0] if stmt.children else None
+                if inner is not None and inner.type == "string":
+                    return inner.text.decode("utf-8")
+                return None
+        return None
+
+    def _extract_calls(self, node) -> list[str]:
         calls = []
         stack = [node]
         while stack:
             n = stack.pop()
-            if n.type == "call":
+            if n.type == "call" or n.type == "call_expression":
                 fn = next(
-                    (c for c in n.children if c.type in ("identifier", "attribute")),
+                    (c for c in n.children if c.type in ("identifier", "attribute", "member_expression")),
                     None,
                 )
                 if fn:
@@ -202,7 +216,7 @@ class SemanticParser:
         except ImportError:
             return []
         try:
-            repo = git.Repo(repo_path)
+            repo = git.Repo(repo_path, search_parent_directories=True)
         except Exception:
             return []
         intents: list[Intent] = []
@@ -218,13 +232,17 @@ class SemanticParser:
                 t = "docs"
             else:
                 t = "other"
+            try:
+                files_changed = [d.a_path for d in commit.diff(f"{commit.hexsha}~1")]
+            except Exception:
+                files_changed = []
             intents.append(
                 Intent(
                     commit_hash=commit.hexsha,
                     author=str(commit.author),
                     timestamp=commit.committed_date,
                     message=commit.message,
-                    files_changed=[d.a_path for d in commit.diff("HEAD~1")],
+                    files_changed=files_changed,
                     inferred_type=t,
                 )
             )

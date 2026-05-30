@@ -3,12 +3,26 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict
 from pathlib import Path
 
 import networkx as nx
 
-from .parser import SemanticParser, Symbol, Intent
+from .parser import SemanticParser, Symbol
+
+
+def _node_link_data(graph):
+    """Kompatibel mit alter und neuer NetworkX-Signatur."""
+    try:
+        return nx.node_link_data(graph, edges="edges")
+    except TypeError:
+        return nx.node_link_data(graph)
+
+
+def _node_link_graph(data):
+    try:
+        return nx.node_link_graph(data, edges="edges", multigraph=True, directed=True)
+    except TypeError:
+        return nx.node_link_graph(data)
 
 
 class KnowledgeGraph:
@@ -31,7 +45,6 @@ class KnowledgeGraph:
         parser = SemanticParser()
         stats = {"symbols": 0, "edges": 0, "intents": 0}
 
-        # 1. Symbole parsen und als Nodes einfügen
         symbols_by_fqid: dict[str, Symbol] = {}
         for sym in parser.parse_directory(repo_root, exclude):
             self.graph.add_node(
@@ -46,28 +59,24 @@ class KnowledgeGraph:
             symbols_by_fqid[sym.fqid] = sym
             stats["symbols"] += 1
 
-        # 2. Namens-Index für Call-Resolution
         name_index: dict[str, list[str]] = {}
         for fqid, sym in symbols_by_fqid.items():
             name_index.setdefault(sym.name, []).append(fqid)
 
-        # 3. Call-Edges
         for fqid, sym in symbols_by_fqid.items():
             for call in sym.calls:
-                targets = name_index.get(call, [])
+                base = call.split(".")[-1]
+                targets = name_index.get(call, []) or name_index.get(base, [])
                 for t in targets:
                     if t != fqid:
                         self.graph.add_edge(fqid, t, kind="calls")
                         stats["edges"] += 1
 
-        # 4. File-Containment-Edges
         for fqid, sym in symbols_by_fqid.items():
             self.graph.add_edge(sym.file, fqid, kind="contains")
 
-        # 5. Git-Intents
         if include_intents:
-            intents = parser.parse_intents(repo_root, intent_depth)
-            for intent in intents:
+            for intent in parser.parse_intents(repo_root, intent_depth):
                 inode = f"intent:{intent.commit_hash}"
                 self.graph.add_node(
                     inode,
@@ -95,13 +104,11 @@ class KnowledgeGraph:
         return results
 
     def upstream(self, fqid: str, depth: int = 3) -> list[str]:
-        """Was hängt von diesem Symbol ab?"""
+        """Was haengt von diesem Symbol ab?"""
         if not self.graph.has_node(fqid):
             return []
         try:
-            return list(
-                nx.ancestors(self.graph.reverse(), fqid)
-            )
+            return list(nx.ancestors(self.graph, fqid))
         except Exception:
             return []
 
@@ -115,7 +122,7 @@ class KnowledgeGraph:
             return []
 
     def impact_analysis(self, fqid: str) -> dict:
-        """SOTA-Feature: Blast-Radius-Analyse."""
+        """Blast-Radius-Analyse."""
         if not self.graph.has_node(fqid):
             return {"error": "Symbol not found"}
         down = self.downstream(fqid)
@@ -129,19 +136,17 @@ class KnowledgeGraph:
             "symbol": fqid,
             "upstream_count": len(up),
             "downstream_count": len(down),
-            "files_affected": list(files_affected),
+            "files_affected": sorted(f for f in files_affected if f),
             "risk_score": min(1.0, len(down) / 50.0),
         }
 
     def explain_architecture(self, top_k: int = 10) -> dict:
         """Top-Hubs und kritische Pfade."""
         if len(self.graph) == 0:
-            return {}
+            return {"total_nodes": 0, "total_edges": 0, "hubs": []}
         try:
             deg = sorted(
-                self.graph.out_degree(),
-                key=lambda x: x[1],
-                reverse=True,
+                self.graph.out_degree(), key=lambda x: x[1], reverse=True
             )[:top_k]
             return {
                 "total_nodes": len(self.graph),
@@ -162,11 +167,10 @@ class KnowledgeGraph:
     # ---------- Persistence ----------
     def save(self, path: str) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        data = nx.node_link_data(self.graph)
         with open(path, "w") as f:
-            json.dump(data, f)
+            json.dump(_node_link_data(self.graph), f)
 
     def load(self, path: str) -> None:
         with open(path) as f:
             data = json.load(f)
-        self.graph = nx.node_link_graph(data)
+        self.graph = _node_link_graph(data)

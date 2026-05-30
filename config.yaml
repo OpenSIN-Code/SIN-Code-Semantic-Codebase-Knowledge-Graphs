@@ -14,8 +14,8 @@ languages:
 
 graph:
   storage: "./.sin/knowledge.graph"
-  temporal_depth: 50  # commits to analyze
-  include_intent: true  # parse commit messages for intent
+  temporal_depth: 50
+  include_intent: true
 
 mcp:
   host: "127.0.0.1"

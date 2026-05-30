@@ -1,4 +1,4 @@
-"""CLI für den SCKG Daemon."""
+"""CLI fuer den SCKG Daemon."""
 from __future__ import annotations
 
 import json
@@ -17,20 +17,19 @@ def _load_config() -> dict:
         if p.exists():
             with open(p) as f:
                 return yaml.safe_load(f)
-    return {"repository": {"root": ".", "exclude": []}, "graph": {"storage": "./.sin/knowledge.graph"}}
+    return {
+        "repository": {"root": ".", "exclude": []},
+        "graph": {"storage": "./.sin/knowledge.graph", "include_intent": True},
+    }
 
 
 @app.command()
-def build(
-    root: str = typer.Option(None, help="Repository root"),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
-):
+def build(root: str = typer.Option(None, help="Repository root")):
     """Build the knowledge graph from a repository."""
     cfg = _load_config()
     repo_root = root or cfg["repository"]["root"]
-    exclude = cfg["repository"]["exclude"]
+    exclude = cfg["repository"].get("exclude", [])
     storage = cfg["graph"]["storage"]
-
     typer.echo(f"[SCKG] Building graph from {repo_root}...")
     kg = KnowledgeGraph(storage_path=storage)
     stats = kg.build_from_repo(
@@ -44,13 +43,12 @@ def find(name: str):
     """Find symbols by name."""
     cfg = _load_config()
     kg = KnowledgeGraph(storage_path=cfg["graph"]["storage"])
-    results = kg.find_symbol(name)
-    typer.echo(json.dumps(results, indent=2))
+    typer.echo(json.dumps(kg.find_symbol(name), indent=2))
 
 
 @app.command()
 def impact(fqid: str):
-    """Impact analysis for a symbol (SOTA blast radius)."""
+    """Impact analysis for a symbol (blast radius)."""
     cfg = _load_config()
     kg = KnowledgeGraph(storage_path=cfg["graph"]["storage"])
     typer.echo(json.dumps(kg.impact_analysis(fqid), indent=2))
@@ -65,10 +63,10 @@ def arch():
 
 
 @app.command()
-def serve(port: int = typer.Option(8765, help="MCP server port")):
+def serve():
     """Run as MCP server."""
-    from .mcp_server import run_server
-    run_server(port=port)
+    from .mcp_server import main
+    main()
 
 
 if __name__ == "__main__":
