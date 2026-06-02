@@ -9,6 +9,12 @@ dependencies = ["pyyaml>=6.0"]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+[project.optional-dependencies]
+mcp = ["mcp[cli]>=1.2"]
+
+[project.scripts]
+sckg = "sin_code_sckg.cli:app"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

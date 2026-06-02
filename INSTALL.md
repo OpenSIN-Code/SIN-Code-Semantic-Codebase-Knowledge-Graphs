@@ -14,7 +14,7 @@ cd SIN-Code-Semantic-Codebase-Knowledge-Graphs
 pip install -e .
 ```
 
-This installs the `sckg` command and the importable package `sin_code_sckg`.
+This installs the `sckg` CLI and the importable package `sin_code_sckg`.
 
 ## Install into an isolated environment
 
