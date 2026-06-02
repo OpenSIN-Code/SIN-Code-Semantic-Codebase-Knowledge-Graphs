@@ -1,65 +1,50 @@
-# SIN-Code Semantic Codebase Knowledge Graphs (SCKG)
+# SIN-Code-Semantic-Codebase-Knowledge-Graphs (SCKG)
 
-> A real dependency graph for AI coding agents — Tree-sitter parsing, Git-history
-> intent, and blast-radius impact analysis instead of a dumb vector store.
+Semantic codebase knowledge graph for the SIN-Code stack. Extracts AST-based
+code intelligence from Python repositories and exposes a graph API for
+navigation, querying, and persistence.
 
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-
-Part of the [SIN-Code](https://github.com/OpenSIN-Code) agent-engineering stack.
-
-## Why
-
-Vector-database RAG retrieves text that *looks* similar. It does not know that
-changing `parse()` will break 14 call sites. SCKG builds an actual
-`MultiDiGraph` of symbols, calls, file-containment and Git-commit intents, so an
-agent can ask structural questions: *what calls this? what breaks if I change
-it? where are the architectural hubs?*
-
-## Features
-
-- **Tree-sitter AST parsing** for Python, JavaScript and TypeScript.
-- **Call / containment edges** resolved across the repository.
-- **Git-history intent extraction** — commits classified as refactor / feature /
-  fix / docs and linked to the files they touched.
-- **Blast-radius impact analysis** with a normalized risk score.
-- **Architecture overview** — top hubs by out-degree, total nodes/edges.
-- **Persistent graph** stored as JSON under `.sin/`.
-- **CLI** (`sckg`) and **MCP server** for agent integration.
-- **Graceful degradation** — a missing language grammar is skipped with a
-  warning, never a crash.
-
-## Quickstart
+## Installation
 
 ```bash
 pip install -e .
-sckg build            # parse the current repo into .sin/knowledge.graph
-sckg arch             # show hubs and totals
-sckg find parse       # locate a symbol by name
-sckg impact "src/x.py:function:parse"   # blast radius
 ```
 
-## Documentation
+## Quick Start
 
-- [INSTALL.md](./INSTALL.md) — installation and verification
-- [docs/USAGE.md](./docs/USAGE.md) — CLI commands and MCP tools
-- [docs/CONFIGURATION.md](./docs/CONFIGURATION.md) — `config.yaml` reference
-- [CONTRIBUTING.md](./CONTRIBUTING.md) — development workflow
-- [CHANGELOG.md](./CHANGELOG.md) — release notes
+```python
+from sin_code_sckg.graph import KnowledgeGraph
 
-## MCP integration
+kg = KnowledgeGraph(storage_path="/path/to/knowledge.graph")
+stats = kg.build_from_repo(
+    "/path/to/repo",
+    exclude={"node_modules", ".venv", ".git", "dist", "build"}
+)
+print(stats)
+# {'files': 42, 'functions': 318, 'classes': 27, 'edges': 412}
 
-```yaml
-# ~/.config/opencode/config.yaml
-mcpServers:
-  sckg:
-    command: sckg
-    args: [serve]
+# Query the graph
+node = kg.get_node("file:main.py")
+neighbors = kg.get_neighbors("file:main.py", edge_type="IMPORTS")
+path = kg.find_path("file:main.py", "class:module:utils:Helper")
 ```
 
-Exposed tools: `find_symbol`, `impact_analysis`, `architecture_overview`,
-`downstream_deps`.
+## API
+
+- `KnowledgeGraph(storage_path)` — load or create a graph
+- `build_from_repo(repo, exclude)` — parse a Python repo
+- `add_node(node)` / `add_edge(edge)` — manual construction
+- `get_node(id)` — lookup by ID
+- `get_neighbors(node_id, edge_type)` — outgoing neighbors
+- `find_path(source, target)` — BFS shortest path
+- `save()` / `to_dict()` — persistence
+
+## Development
+
+```bash
+pytest
+```
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT

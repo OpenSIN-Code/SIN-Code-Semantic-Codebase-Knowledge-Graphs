@@ -1,176 +1,96 @@
-"""NetworkX-basierter Knowledge Graph mit temporalen Kanten."""
-from __future__ import annotations
+"""Main KnowledgeGraph API.
 
-import json
-import os
+Docs: graph.py.doc.md
+"""
+
 from pathlib import Path
+from typing import Any
 
-import networkx as nx
-
-from .parser import SemanticParser, Symbol
-
-
-def _node_link_data(graph):
-    """Kompatibel mit alter und neuer NetworkX-Signatur."""
-    try:
-        return nx.node_link_data(graph, edges="edges")
-    except TypeError:
-        return nx.node_link_data(graph)
-
-
-def _node_link_graph(data):
-    try:
-        return nx.node_link_graph(data, edges="edges", multigraph=True, directed=True)
-    except TypeError:
-        return nx.node_link_graph(data)
+from .builder import GraphBuilder
+from .nodes import Node, FileNode, FunctionNode, ClassNode, ModuleNode
+from .edges import Edge
+from .query import QueryEngine
+from .storage import GraphStorage
 
 
 class KnowledgeGraph:
-    """Persistenter semantischer Knowledge Graph."""
+    """In-memory knowledge graph with persistence and traversal."""
 
-    def __init__(self, storage_path: str | None = None):
-        self.graph = nx.MultiDiGraph()
-        self.storage_path = storage_path
-        if storage_path and os.path.exists(storage_path):
-            self.load(storage_path)
+    def __init__(self, storage_path: str | Path):
+        """Load existing graph or create empty one."""
+        self.storage_path = Path(storage_path)
+        self.storage = GraphStorage(self.storage_path)
+        self.nodes: dict[str, Node] = {}
+        self.edges: list[Edge] = []
+        self._load()
 
-    def build_from_repo(
-        self,
-        repo_root: str,
-        exclude: list[str] | None = None,
-        include_intents: bool = True,
-        intent_depth: int = 50,
-    ) -> dict:
-        exclude = exclude or []
-        parser = SemanticParser()
-        stats = {"symbols": 0, "edges": 0, "intents": 0}
+    def _load(self) -> None:
+        """Load persisted state if present."""
+        data = self.storage.load()
+        for node_data in data.get("nodes", {}).values():
+            node = self._node_from_dict(node_data)
+            if node:
+                self.nodes[node.id] = node
+        for edge_data in data.get("edges", []):
+            self.edges.append(Edge.from_dict(edge_data))
 
-        symbols_by_fqid: dict[str, Symbol] = {}
-        for sym in parser.parse_directory(repo_root, exclude):
-            self.graph.add_node(
-                sym.fqid,
-                name=sym.name,
-                kind=sym.kind,
-                file=sym.file,
-                line_start=sym.line_start,
-                line_end=sym.line_end,
-                docstring=sym.docstring,
-            )
-            symbols_by_fqid[sym.fqid] = sym
-            stats["symbols"] += 1
+    def _node_from_dict(self, data: dict) -> Node | None:
+        """Reconstruct a node from its serialized dict."""
+        type_map = {
+            "FileNode": FileNode,
+            "FunctionNode": FunctionNode,
+            "ClassNode": ClassNode,
+            "ModuleNode": ModuleNode,
+        }
+        cls = type_map.get(data.get("type"), Node)
+        try:
+            return cls.from_dict(data)
+        except Exception:
+            return None
 
-        name_index: dict[str, list[str]] = {}
-        for fqid, sym in symbols_by_fqid.items():
-            name_index.setdefault(sym.name, []).append(fqid)
+    def add_node(self, node: Node) -> None:
+        """Add or overwrite a node in the graph."""
+        self.nodes[node.id] = node
 
-        for fqid, sym in symbols_by_fqid.items():
-            for call in sym.calls:
-                base = call.split(".")[-1]
-                targets = name_index.get(call, []) or name_index.get(base, [])
-                for t in targets:
-                    if t != fqid:
-                        self.graph.add_edge(fqid, t, kind="calls")
-                        stats["edges"] += 1
+    def add_edge(self, edge: Edge) -> None:
+        """Add an edge to the graph."""
+        self.edges.append(edge)
 
-        for fqid, sym in symbols_by_fqid.items():
-            self.graph.add_edge(sym.file, fqid, kind="contains")
+    def get_node(self, id: str) -> Node | None:
+        """Retrieve a node by its ID."""
+        return self.nodes.get(id)
 
-        if include_intents:
-            for intent in parser.parse_intents(repo_root, intent_depth):
-                inode = f"intent:{intent.commit_hash}"
-                self.graph.add_node(
-                    inode,
-                    kind="intent",
-                    author=intent.author,
-                    timestamp=intent.timestamp,
-                    message=intent.message,
-                    inferred_type=intent.inferred_type,
-                )
-                for f in intent.files_changed:
-                    if self.graph.has_node(f):
-                        self.graph.add_edge(inode, f, kind="touches")
-                stats["intents"] += 1
+    def get_neighbors(self, node_id: str, edge_type: str | None = None) -> list[Node]:
+        """Return neighbors of a node via outgoing edges."""
+        engine = QueryEngine(self.nodes, self.edges)
+        return engine.get_neighbors(node_id, edge_type)
 
-        if self.storage_path:
-            self.save(self.storage_path)
+    def find_path(self, source_id: str, target_id: str) -> list[str]:
+        """Find shortest path between two node IDs."""
+        engine = QueryEngine(self.nodes, self.edges)
+        return engine.find_path(source_id, target_id)
+
+    def build_from_repo(self, repo: str | Path, exclude: set[str] | None = None) -> dict[str, Any]:
+        """Build graph from a code repository.
+
+        Returns stats dict like: {"files": 42, "functions": 318, "classes": 27, "edges": 412}
+        """
+        builder = GraphBuilder(exclude=exclude)
+        nodes, edges, stats = builder.build(repo)
+        for node in nodes:
+            self.add_node(node)
+        for edge in edges:
+            self.add_edge(edge)
+        self.save()
         return stats
 
-    # ---------- Querying ----------
-    def find_symbol(self, name: str) -> list[dict]:
-        results = []
-        for node, data in self.graph.nodes(data=True):
-            if data.get("name") == name:
-                results.append({"id": node, **data})
-        return results
-
-    def upstream(self, fqid: str, depth: int = 3) -> list[str]:
-        """Was haengt von diesem Symbol ab?"""
-        if not self.graph.has_node(fqid):
-            return []
-        try:
-            return list(nx.ancestors(self.graph, fqid))
-        except Exception:
-            return []
-
-    def downstream(self, fqid: str, depth: int = 3) -> list[str]:
-        """Was nutzt dieses Symbol?"""
-        if not self.graph.has_node(fqid):
-            return []
-        try:
-            return list(nx.descendants(self.graph, fqid))
-        except Exception:
-            return []
-
-    def impact_analysis(self, fqid: str) -> dict:
-        """Blast-Radius-Analyse."""
-        if not self.graph.has_node(fqid):
-            return {"error": "Symbol not found"}
-        down = self.downstream(fqid)
-        up = self.upstream(fqid)
-        files_affected = {
-            self.graph.nodes[n].get("file")
-            for n in down
-            if self.graph.nodes[n].get("file")
-        }
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the graph to a dictionary."""
         return {
-            "symbol": fqid,
-            "upstream_count": len(up),
-            "downstream_count": len(down),
-            "files_affected": sorted(f for f in files_affected if f),
-            "risk_score": min(1.0, len(down) / 50.0),
+            "nodes": {node_id: node.to_dict() for node_id, node in self.nodes.items()},
+            "edges": [edge.to_dict() for edge in self.edges],
         }
 
-    def explain_architecture(self, top_k: int = 10) -> dict:
-        """Top-Hubs und kritische Pfade."""
-        if len(self.graph) == 0:
-            return {"total_nodes": 0, "total_edges": 0, "hubs": []}
-        try:
-            deg = sorted(
-                self.graph.out_degree(), key=lambda x: x[1], reverse=True
-            )[:top_k]
-            return {
-                "total_nodes": len(self.graph),
-                "total_edges": self.graph.number_of_edges(),
-                "hubs": [
-                    {
-                        "id": n,
-                        "out_degree": d,
-                        "kind": self.graph.nodes[n].get("kind"),
-                        "name": self.graph.nodes[n].get("name"),
-                    }
-                    for n, d in deg
-                ],
-            }
-        except Exception as e:
-            return {"error": str(e)}
-
-    # ---------- Persistence ----------
-    def save(self, path: str) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(_node_link_data(self.graph), f)
-
-    def load(self, path: str) -> None:
-        with open(path) as f:
-            data = json.load(f)
-        self.graph = _node_link_graph(data)
+    def save(self) -> None:
+        """Persist the graph to storage_path."""
+        self.storage.save(self.to_dict())
