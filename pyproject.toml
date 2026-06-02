@@ -3,6 +3,7 @@ name = "sin-code-sckg"
 version = "0.1.0"
 description = "Semantic codebase knowledge graph for SIN-Code stack"
 requires-python = ">=3.11"
+dependencies = ["pyyaml>=6.0"]
 
 [build-system]
 requires = ["setuptools>=68.0"]
