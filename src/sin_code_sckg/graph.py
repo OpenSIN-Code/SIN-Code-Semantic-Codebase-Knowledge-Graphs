@@ -91,6 +91,15 @@ class KnowledgeGraph:
             "edges": [edge.to_dict() for edge in self.edges],
         }
 
+    def query(self, text: str) -> list[Node]:
+        """Search nodes by name or file path (case-insensitive)."""
+        text_lower = text.lower()
+        results = []
+        for node in self.nodes.values():
+            if text_lower in node.name.lower() or text_lower in node.file_path.lower():
+                results.append(node)
+        return results
+
     def save(self) -> None:
         """Persist the graph to storage_path."""
         self.storage.save(self.to_dict())
