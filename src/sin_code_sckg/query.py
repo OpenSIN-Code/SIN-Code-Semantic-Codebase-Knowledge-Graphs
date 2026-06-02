@@ -48,13 +48,18 @@ class QueryEngine:
             target = edge.target
             edge_type = edge.type
 
+            # Skip orphan edges whose source or target don't exist in nodes
+            if source not in self.nodes or target not in self.nodes:
+                continue
+
             # Adjacency list (outgoing edges only)
             self._adjacency.setdefault(source, []).append(edge)
 
             # Adjacency by type (outgoing edges only)
-            if edge_type not in self._adjacency_by_type[source]:
-                self._adjacency_by_type[source][edge_type] = []
-            self._adjacency_by_type[source][edge_type].append(edge)
+            adj_types = self._adjacency_by_type.setdefault(source, {})
+            if edge_type not in adj_types:
+                adj_types[edge_type] = []
+            adj_types[edge_type].append(edge)
 
             # Neighbor index (outgoing neighbors only for directed graphs)
             # For directed graphs like import relationships, we only follow
