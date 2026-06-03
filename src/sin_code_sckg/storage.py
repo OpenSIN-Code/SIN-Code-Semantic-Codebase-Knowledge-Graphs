@@ -4,6 +4,7 @@ Docs: storage.py.doc.md
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,11 @@ class GraphStorage:
 
     def load(self) -> dict[str, Any]:
         """Load graph data from JSON."""
-        if not self.path.exists():
+        max_size = 500 * 1024 * 1024  # 500MB
+        if self.path.exists():
+            if os.path.getsize(self.path) > max_size:
+                raise ValueError("Graph file too large")
+        else:
             return {"nodes": {}, "edges": []}
         with open(self.path, "r", encoding="utf-8") as f:
             return json.load(f)

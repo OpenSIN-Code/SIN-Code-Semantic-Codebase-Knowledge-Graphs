@@ -196,6 +196,10 @@ class SemanticParser:
 
     def parse_directory(self, root: str, exclude: list[str]) -> Iterator[Symbol]:
         root_path = Path(root).resolve()
+        # Enforce workspace boundary
+        workspace = os.path.expanduser("~")
+        if not str(root_path).startswith(workspace):
+            raise ValueError(f"Path outside workspace: {root}")
         for dirpath, dirnames, filenames in os.walk(root_path):
             dirnames[:] = [
                 d for d in dirnames

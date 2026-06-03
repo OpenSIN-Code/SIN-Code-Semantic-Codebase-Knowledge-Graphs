@@ -3,6 +3,8 @@
 Docs: graph.py.doc.md
 """
 
+import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -22,15 +24,17 @@ class KnowledgeGraph:
         self.storage = GraphStorage(self.storage_path)
         self.nodes: dict[str, Node] = {}
         self.edges: list[Edge] = []
+        self._inverted_index: dict[str, set[str]] = defaultdict(set)
         self._load()
 
     def _load(self) -> None:
-        """Load persisted state if present."""
+        """Load persisted state if present and rebuild inverted index."""
         data = self.storage.load()
         for node_data in data.get("nodes", {}).values():
             node = self._node_from_dict(node_data)
             if node:
                 self.nodes[node.id] = node
+                self._index_node(node)
         for edge_data in data.get("edges", []):
             self.edges.append(Edge.from_dict(edge_data))
 
@@ -48,9 +52,55 @@ class KnowledgeGraph:
         except Exception:
             return None
 
+    def _tokenize(self, text: str) -> set[str]:
+        """Extract lowercase word tokens from text.
+
+        Generates both full word tokens and sub-components split by
+        underscores / path separators so that "helper" matches "helper_0".
+        """
+        lower = text.lower()
+        tokens: set[str] = set()
+        # Full word tokens (includes underscores, e.g. helper_0)
+        for token in re.findall(r"\b[a-z_][a-z0-9_]*\b", lower):
+            tokens.add(token)
+            # Also index sub-components split by underscore
+            for part in token.split("_"):
+                if len(part) >= 2:
+                    tokens.add(part)
+        # Path / dot components (e.g. module_0.py -> module_0, py, module, 0)
+        for token in re.findall(r"[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*", lower):
+            for part in re.split(r"[_.]", token):
+                if len(part) >= 2:
+                    tokens.add(part.lower())
+        return tokens
+
+    def _index_node(self, node: Node) -> None:
+        """Add a node to the inverted index."""
+        tokens = self._tokenize(node.name + " " + node.file_path)
+        for token in tokens:
+            self._inverted_index[token].add(node.id)
+
+    def _query_score(self, node: Node, query_lower: str) -> float:
+        """Score relevance of a node against a query string.
+
+        Higher is better. Prefers exact name matches over file path matches.
+        """
+        name_lower = node.name.lower()
+        file_lower = node.file_path.lower()
+        score = 0.0
+        # Exact match bonus
+        if query_lower == name_lower:
+            score += 10.0
+        elif query_lower in name_lower:
+            score += 5.0
+        if query_lower in file_lower:
+            score += 1.0
+        return score
+
     def add_node(self, node: Node) -> None:
-        """Add or overwrite a node in the graph."""
+        """Add or overwrite a node in the graph and update the inverted index."""
         self.nodes[node.id] = node
+        self._index_node(node)
 
     def add_edge(self, edge: Edge) -> None:
         """Add an edge to the graph."""
@@ -91,14 +141,39 @@ class KnowledgeGraph:
             "edges": [edge.to_dict() for edge in self.edges],
         }
 
-    def query(self, text: str) -> list[Node]:
-        """Search nodes by name or file path (case-insensitive)."""
-        text_lower = text.lower()
+    def query(self, text: str, limit: int = 10) -> list[Node]:
+        """Search nodes by name or file path using an inverted index (case-insensitive).
+
+        Uses AND semantics across query tokens. Results are ranked by relevance.
+        """
+        tokens = self._tokenize(text)
+        if not tokens:
+            return []
+
+        candidate_ids = None
+        for token in tokens:
+            if token in self._inverted_index:
+                if candidate_ids is None:
+                    candidate_ids = self._inverted_index[token].copy()
+                else:
+                    candidate_ids &= self._inverted_index[token]
+            else:
+                return []
+
+        if not candidate_ids:
+            return []
+
+        query_lower = text.lower()
+        # Use heapq.nlargest for O(m log limit) instead of O(m log m) sort
+        import heapq
         results = []
-        for node in self.nodes.values():
-            if text_lower in node.name.lower() or text_lower in node.file_path.lower():
-                results.append(node)
-        return results
+        for node_id in candidate_ids:
+            node = self.nodes[node_id]
+            score = self._query_score(node, query_lower)
+            results.append((score, node))
+
+        top = heapq.nlargest(limit, results, key=lambda x: x[0])
+        return [r[1] for r in top]
 
     def save(self) -> None:
         """Persist the graph to storage_path."""
