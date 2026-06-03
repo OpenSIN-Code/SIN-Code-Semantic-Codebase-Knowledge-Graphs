@@ -100,6 +100,9 @@ class QueryEngine:
         if source_id not in self.nodes or target_id not in self.nodes:
             return []
         if source_id == target_id:
+            # If a self-edge exists, return 1-hop path; otherwise just the node
+            if source_id in self._neighbor_index.get(source_id, set()):
+                return [source_id, target_id]
             return [source_id]
 
         queue = deque([(source_id, [source_id])])

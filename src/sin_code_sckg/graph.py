@@ -57,6 +57,7 @@ class KnowledgeGraph:
 
         Generates both full word tokens and sub-components split by
         underscores / path separators so that "helper" matches "helper_0".
+        Also captures Unicode/CJK runs so that こんにちは is searchable.
         """
         lower = text.lower()
         tokens: set[str] = set()
@@ -72,6 +73,11 @@ class KnowledgeGraph:
             for part in re.split(r"[_.]", token):
                 if len(part) >= 2:
                     tokens.add(part.lower())
+        # Unicode / CJK runs (e.g. こんにちは, 日本語, مرحبا)
+        # Also add length-2+ prefixes so "こんにちは" matches "こんにちは関数"
+        for token in re.findall(r'[^\x00-\x7F\s_.\-]+', lower):
+            for i in range(2, len(token) + 1):
+                tokens.add(token[:i])
         return tokens
 
     def _index_node(self, node: Node) -> None:
