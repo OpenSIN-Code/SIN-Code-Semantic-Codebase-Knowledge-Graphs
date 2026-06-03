@@ -6,40 +6,78 @@ Docs: builder.py.doc.md
 import ast
 import os
 from pathlib import Path
-from typing import Set
+from typing import Any
 
 from .nodes import FileNode, FunctionNode, ClassNode, ModuleNode
 from .edges import Edge, EdgeType
 
 
+# Directory names that should never be traversed; merged with user-supplied excludes.
+# These cover common build/test/venv artifacts that pollute the graph.
+_DEFAULT_EXCLUDES = {
+    "node_modules",
+    ".venv",
+    ".git",
+    "dist",
+    "build",
+    "__pycache__",
+    ".pytest_cache",
+}
+
+
 class GraphBuilder:
-    """Extracts nodes and edges from a Python repository."""
+    """Extracts nodes and edges from a Python repository.
+
+    Walks the repo with `os.walk`, parses every `.py` file with the stdlib
+    `ast` module, and accumulates `Node` + `Edge` instances representing
+    files, modules, classes, functions, imports, calls, and inheritance.
+
+    The builder is single-use: instantiate, call `build()`, then read the
+    accumulated `nodes`, `edges`, and `stats` attributes.
+    """
 
     def __init__(self, exclude: set[str] | None = None):
-        self.exclude = exclude or set()
-        self.exclude.update({"node_modules", ".venv", ".git", "dist", "build", "__pycache__", ".pytest_cache"})
-        self.stats = {"files": 0, "functions": 0, "classes": 0, "edges": 0}
-        self.nodes = []
-        self.edges = []
+        """Initialize the builder.
 
-    def build(self, repo: str | Path) -> tuple[list, list, dict]:
+        Args:
+            exclude: Additional directory names to skip. The defaults
+                (`_DEFAULT_EXCLUDES`) are always merged in regardless.
+        """
+        self.exclude = exclude or set()
+        self.exclude.update(_DEFAULT_EXCLUDES)
+        self.stats: dict[str, int] = {"files": 0, "functions": 0, "classes": 0, "edges": 0}
+        self.nodes: list[Any] = []
+        self.edges: list[Edge] = []
+
+    def build(self, repo: str | Path) -> tuple[list[Any], list[Edge], dict[str, int]]:
         """Walk repo and extract all nodes and edges.
 
-        Returns (nodes, edges, stats).
+        Args:
+            repo: Path to the repository root. Resolved to an absolute path
+                before traversal.
+
+        Returns:
+            A 3-tuple `(nodes, edges, stats)`. The `stats` dict also gets
+            an `edges` key with the final edge count.
         """
         repo_path = Path(repo).resolve()
         for root, dirs, files in os.walk(repo_path):
-            # Skip excluded directories
+            # In-place mutation of `dirs` prunes os.walk's traversal.
             dirs[:] = [d for d in dirs if d not in self.exclude]
             for file in files:
                 if file.endswith(".py"):
                     file_path = Path(root) / file
                     self._process_file(file_path, repo_path)
+        # `edges` is added at the end so partial failures still produce a count.
         self.stats["edges"] = len(self.edges)
         return self.nodes, self.edges, self.stats
 
     def _process_file(self, file_path: Path, repo_path: Path) -> None:
-        """Parse a single Python file and extract nodes/edges."""
+        """Parse a single Python file and extract nodes/edges.
+
+        Read/parse errors are swallowed: a single malformed file should
+        never abort the whole repo scan. We just skip it.
+        """
         try:
             source = file_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
@@ -71,7 +109,12 @@ class GraphBuilder:
         self._extract_from_ast(tree, file_path, rel_path, module_id, source)
 
     def _extract_from_ast(self, tree: ast.AST, file_path: Path, rel_path: str, module_id: str, source: str) -> None:
-        """Walk AST and extract classes, functions, imports, calls, inheritance."""
+        """Walk AST and extract classes, functions, imports, calls, inheritance.
+
+        Methods are extracted during their enclosing class's pass; the
+        `processed_methods` set guards against double-counting them at the
+        top-level `ast.walk` step.
+        """
         processed_methods: set[int] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
@@ -138,7 +181,11 @@ class GraphBuilder:
                     self.edges.append(Edge(source=module_id, target=import_id, type=EdgeType.IMPORTS.value))
 
     def _extract_calls(self, node: ast.FunctionDef | ast.AsyncFunctionDef, func_id: str, module_id: str) -> None:
-        """Extract function calls from a function body."""
+        """Extract function calls from a function body.
+
+        Walks the subtree rooted at `node` and emits one `CALLS` edge per
+        `ast.Call` whose callable resolves to a non-empty name.
+        """
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
                 call_name = self._get_name(child.func)
@@ -147,7 +194,7 @@ class GraphBuilder:
                     self.edges.append(Edge(source=func_id, target=target_id, type=EdgeType.CALLS.value))
 
     def _get_name(self, node: ast.AST) -> str | None:
-        """Extract dotted name from an AST node."""
+        """Extract a dotted name from an AST node (Name or Attribute chain)."""
         if isinstance(node, ast.Name):
             return node.id
         elif isinstance(node, ast.Attribute):
@@ -158,11 +205,16 @@ class GraphBuilder:
         return None
 
     def _resolve_name(self, name: str, module_id: str) -> str:
-        """Best-effort resolution of a name to a node ID."""
+        """Best-effort resolution of a name to a node ID.
+
+        Dotted names are assumed module-qualified (e.g. `os.path.join` ->
+        `module:os.path.join`). Bare names are resolved as functions in the
+        current module. This is a heuristic, not a true name resolver.
+        """
         # If name contains a dot, treat as module-qualified
         if "." in name:
-            parts = name.split(".")
-            # Heuristic: if first part is a known module, treat as module:...
+            # Heuristic: dotted names are almost always module: references
+            # (e.g. os.path.join, requests.get, myproj.utils.parse).
             return f"module:{name}"
         # Otherwise assume local to current module
         return f"func:{module_id}:{name}"

@@ -4,25 +4,31 @@ Docs: query.py.doc.md
 """
 
 from collections import deque
-from typing import Optional
+from typing import Any
 
 
 class QueryEngine:
     """Provides traversal queries over the knowledge graph.
 
     PERFORMANCE FIX: Uses pre-built indexes for O(1) lookups:
-    - _adjacency: node_id -> list of edges (for graph traversal)
-    - _adjacency_by_type: node_id -> edge_type -> list of edges
-    - _neighbor_index: node_id -> set of neighbor_ids (for fast neighbor checks)
-    - _edge_index: edge_type -> list of edges (for fast edge filtering)
+    - `_adjacency`: node_id -> list of edges (for graph traversal)
+    - `_adjacency_by_type`: node_id -> edge_type -> list of edges
+    - `_neighbor_index`: node_id -> set of neighbor_ids (for fast neighbor checks)
+    - `_edge_index`: edge_type -> list of edges (for fast edge filtering)
 
-    These indexes are built once during __init__ and make queries
-    on 10000+ nodes run in milliseconds instead of seconds.
+    These indexes are built once during `__init__` and make queries on
+    10000+ nodes run in milliseconds instead of seconds.
     """
 
     def __init__(self, nodes: dict, edges: list):
-        self.nodes = nodes
-        self.edges = edges
+        """Build the lookup indexes once.
+
+        Args:
+            nodes: Mapping of node_id -> Node instance.
+            edges: List of `Edge` instances (orphan edges are skipped).
+        """
+        self.nodes: dict = nodes
+        self.edges: list = edges
         self._adjacency: dict[str, list] = {}
         self._adjacency_by_type: dict[str, dict[str, list]] = {}
         self._neighbor_index: dict[str, set[str]] = {}
@@ -61,9 +67,9 @@ class QueryEngine:
                 adj_types[edge_type] = []
             adj_types[edge_type].append(edge)
 
-            # Neighbor index (outgoing neighbors only for directed graphs)
-            # For directed graphs like import relationships, we only follow
-            # the direction of the edge (source -> target).
+            # Neighbor index (outgoing neighbors only for directed graphs).
+            # For directed relationships like IMPORTS we only follow the
+            # direction of the edge (source -> target).
             self._neighbor_index.setdefault(source, set()).add(target)
 
             # Edge index by type
@@ -72,9 +78,9 @@ class QueryEngine:
             self._edge_index[edge_type].append(edge)
 
     def get_neighbors(self, node_id: str, edge_type: str | None = None) -> list:
-        """Return neighbor nodes reachable from node_id via outgoing edges.
+        """Return neighbor nodes reachable from `node_id` via outgoing edges.
 
-        If edge_type is provided, only edges of that type are considered.
+        If `edge_type` is provided, only edges of that type are followed.
         PERFORMANCE: O(1) lookup using pre-built indexes.
         """
         if node_id not in self._adjacency:
@@ -91,10 +97,11 @@ class QueryEngine:
         return [nodes[edge.target] for edge in edges if edge.target in nodes]
 
     def find_path(self, source_id: str, target_id: str) -> list[str]:
-        """Find shortest path from source to target using BFS.
+        """Find shortest path from `source_id` to `target_id` using BFS.
 
-        Returns list of node IDs including source and target.
-        Empty list if no path exists.
+        Returns the list of node IDs including both endpoints. Empty list
+        if no path exists. For `source == target`, returns `[source_id]`
+        unless a self-edge exists, in which case `[source_id, target_id]`.
         PERFORMANCE: Uses neighbor index for O(1) neighbor checks.
         """
         if source_id not in self.nodes or target_id not in self.nodes:
